@@ -1,0 +1,10 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Datasets, checkpoints, logs and Trackio data live on /media (see env.sh), never in the repo
+outputs/
+wandb/
+*.log

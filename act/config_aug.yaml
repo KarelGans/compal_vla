@@ -1,0 +1,83 @@
+# ACT with image augmentation: identical to act/config.yaml except the dataset.image_transforms
+# section, which is on and spelled out in full. Compare its held-out score with the plain run.
+#
+#   CONFIG=act/config_aug.yaml RUN_NAME=act_aug bash act/train.sh
+
+# --- training loop
+seed: 1000                    # also fixes the shuffle order
+batch_size: 8                 # ACT paper / LeRobot default
+steps: 100000                 # 100k x 8 = 800k samples = ~4.9 passes over the 164k training frames
+save_freq: 10000              # one checkpoint is ~0.6 GB, so 10 = ~6 GB; evaluate them all and keep the best
+log_freq: 200
+num_workers: 8                # decoding 2 camera videos per sample is the bottleneck for a small model
+prefetch_factor: 4
+
+# --- data
+dataset:
+  repo_id: compal/open_box_flaps_right6_onehot  # made by scripts/add_flap_onehot.py, read from $HF_LEROBOT_HOME
+  exclude_episodes: [10, 19, 30, 40]            # held out, one per recording set; must match meta/open_box_split.json
+  image_transforms:             # random changes to each training image, so the model can't memorize exact pixels
+    enable: true
+    backend: gpu              # applied on the GPU, keeping the CPU free for video decoding
+    gpu_compile: false        # plain PyTorch; compiling saves little at batch 8
+    gpu_chunk_size: 32
+    max_num_transforms: 3     # each image gets up to 3 of the transforms below
+    random_order: false
+    tfs:
+      brightness: {weight: 1.0, type: ColorJitter, kwargs: {brightness: [0.8, 1.2]}}
+      contrast:   {weight: 1.0, type: ColorJitter, kwargs: {contrast: [0.8, 1.2]}}
+      saturation: {weight: 1.0, type: ColorJitter, kwargs: {saturation: [0.5, 1.5]}}
+      hue:        {weight: 1.0, type: ColorJitter, kwargs: {hue: [-0.05, 0.05]}}
+      sharpness:  {weight: 1.0, type: SharpnessJitter, kwargs: {sharpness: [0.5, 1.5]}}
+      affine:     {weight: 1.0, type: RandomAffine, kwargs: {degrees: [-5.0, 5.0], translate: [0.05, 0.05]}}  # rotate +-5 deg, shift +-5%
+
+# --- model
+policy:
+  type: act
+  device: cuda
+  push_to_hub: false
+  use_amp: false              # mixed precision; the model is small, so full precision is affordable
+
+  # what goes in and out
+  n_obs_steps: 1              # current frame only
+  chunk_size: 100             # predicts 100 steps = 3.3 s at 30 fps
+  n_action_steps: 100         # steps executed before predicting again; scripts/run_robot.py overrides it
+  normalization_mapping:      # the flap input (observation.environment_state) is not normalized
+    VISUAL: MEAN_STD
+    STATE: MEAN_STD
+    ACTION: MEAN_STD
+
+  # image encoder: one ResNet18 shared by both cameras, ImageNet weights
+  vision_backbone: resnet18
+  pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1
+  replace_final_stride_with_dilation: false
+
+  # transformer
+  dim_model: 512
+  n_heads: 8
+  dim_feedforward: 3200
+  feedforward_activation: relu
+  n_encoder_layers: 4
+  n_decoder_layers: 1         # the original ACT code effectively used 1 (see LeRobot's note)
+  pre_norm: false
+  dropout: 0.1
+
+  # VAE: lets ACT represent different ways of doing the same motion
+  use_vae: true
+  latent_dim: 32
+  n_vae_encoder_layers: 4
+  kl_weight: 10.0
+
+  # inference only: averaging overlapping chunks. Leave null here and choose at run time with
+  # scripts/run_robot.py --temporal-ensemble 0.01 (the ACT paper's value)
+  temporal_ensemble_coeff: null
+
+  # optimizer: AdamW with a constant learning rate (ACT uses no schedule)
+  optimizer_lr: 1.0e-5
+  optimizer_lr_backbone: 1.0e-5
+  optimizer_weight_decay: 1.0e-4
+
+# --- live curves: uv run trackio show --project act_open_box
+trackio:
+  enable: true
+  project: act_open_box
