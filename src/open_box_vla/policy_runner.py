@@ -3,7 +3,11 @@
 The models are trained on the 6 right-arm joints only. This wrapper takes the robot's full
 14-D joint vector, feeds the right-arm slice to the policy, and turns the predicted
 right-arm targets back into a full 14-D command: the left arm holds its current pose
-and the grippers get the constants seen in the recordings.
+and the grippers get the constant commands of the dataset the checkpoint was trained on
+(datasets/<name>.yaml, found through the checkpoint's train_config.json).
+
+The cameras are the ones the checkpoint was trained with (`camera_names`; the thor dataset uses
+head, wrist_right and knife_left). Pass them as a dict {camera name: HxWx3 uint8 RGB}.
 
 The flap is given as a text prompt. Models with a text input (pi0.5) read it directly; for
 models trained with the flap as 4 numbers (ACT, see scripts/add_flap_onehot.py) the wrapper
@@ -19,9 +23,11 @@ from lerobot.policies import make_pre_post_processors
 from lerobot.policies.factory import get_policy_class
 from lerobot.policies.utils import prepare_observation_for_inference
 
-from open_box_vla.constants import CAMERA_KEYS, CONSTANT_ACTION_DIMS, FLAP_ONEHOT_KEY, MODEL_DIM_INDICES, flap_onehot
+from open_box_vla.constants import FLAP_ONEHOT_KEY, MODEL_DIM_INDICES, flap_onehot
+from open_box_vla.dataset_specs import spec_for_checkpoint
 
 STATE_KEY = "observation.state"
+IMAGE_PREFIX = "observation.images."
 
 
 class FlapPolicy:
@@ -51,6 +57,9 @@ class FlapPolicy:
         self.policy = get_policy_class(config.type).from_pretrained(str(checkpoint), config=config)
         self.policy.to(self.device).eval()
         self.uses_flap_onehot = FLAP_ONEHOT_KEY in self.policy.config.input_features
+        self.camera_keys = list(self.policy.config.image_features)
+        self.camera_names = [k.removeprefix(IMAGE_PREFIX) for k in self.camera_keys]
+        self.spec = spec_for_checkpoint(checkpoint)  # constant gripper commands, finish pose, flap order
         self.preprocessor, self.postprocessor = make_pre_post_processors(
             self.policy.config,
             pretrained_path=str(checkpoint),
@@ -62,34 +71,34 @@ class FlapPolicy:
         """Drop queued actions. Call at episode start and whenever the prompt changes."""
         self.policy.reset()
 
-    def _batch(self, head_rgb: np.ndarray, wrist_rgb: np.ndarray, joints14: np.ndarray, prompt: str) -> dict:
-        obs = {
-            CAMERA_KEYS[0]: np.ascontiguousarray(head_rgb),   # HxWx3 uint8 RGB, 480x640 like training
-            CAMERA_KEYS[1]: np.ascontiguousarray(wrist_rgb),
-            STATE_KEY: np.asarray(joints14, dtype=np.float32)[MODEL_DIM_INDICES],
-        }
+    def _batch(self, images: dict[str, np.ndarray], joints14: np.ndarray, prompt: str) -> dict:
+        missing = [n for n in self.camera_names if n not in images]
+        if missing:
+            raise KeyError(f"missing camera images {missing}; this checkpoint uses {self.camera_names}")
+        # HxWx3 uint8 RGB, 480x640 like the recordings
+        obs = {k: np.ascontiguousarray(images[n]) for k, n in zip(self.camera_keys, self.camera_names)}
+        obs[STATE_KEY] = np.asarray(joints14, dtype=np.float32)[MODEL_DIM_INDICES]
         if self.uses_flap_onehot:
             obs[FLAP_ONEHOT_KEY] = np.asarray(flap_onehot(prompt), dtype=np.float32)
         obs = prepare_observation_for_inference(obs, self.device, task=prompt)
         return self.preprocessor(obs)
 
     @torch.inference_mode()
-    def step(self, head_rgb: np.ndarray, wrist_rgb: np.ndarray, joints14: np.ndarray, prompt: str) -> np.ndarray:
+    def step(self, images: dict[str, np.ndarray], joints14: np.ndarray, prompt: str) -> np.ndarray:
         """Return the next 14-D joint-position command (call at 30 Hz)."""
-        action = self.policy.select_action(self._batch(head_rgb, wrist_rgb, joints14, prompt))
+        action = self.policy.select_action(self._batch(images, joints14, prompt))
         right = self.postprocessor(action).squeeze(0).float().cpu().numpy()
         return self.to_full_command(right, joints14)
 
     @torch.inference_mode()
-    def predict_chunk(self, head_rgb: np.ndarray, wrist_rgb: np.ndarray, joints14: np.ndarray, prompt: str) -> np.ndarray:
+    def predict_chunk(self, images: dict[str, np.ndarray], joints14: np.ndarray, prompt: str) -> np.ndarray:
         """Return the full (chunk_size, 6) right-arm target chunk without touching the queue."""
-        chunk = self.policy.predict_action_chunk(self._batch(head_rgb, wrist_rgb, joints14, prompt))
+        chunk = self.policy.predict_action_chunk(self._batch(images, joints14, prompt))
         return self.postprocessor(chunk).squeeze(0).float().cpu().numpy()
 
-    @staticmethod
-    def to_full_command(right6: np.ndarray, joints14: np.ndarray) -> np.ndarray:
+    def to_full_command(self, right6: np.ndarray, joints14: np.ndarray) -> np.ndarray:
         cmd = np.asarray(joints14, dtype=np.float32).copy()  # left arm: hold current pose
         cmd[MODEL_DIM_INDICES] = right6
-        for i, value in CONSTANT_ACTION_DIMS.items():
+        for i, value in self.spec.constant_commands.items():
             cmd[i] = value
         return cmd

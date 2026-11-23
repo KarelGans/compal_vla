@@ -1,22 +1,17 @@
-"""Facts about the recorded mocap dataset that the rest of the code relies on.
+"""Facts shared by every recorded dataset. Per-dataset facts (folders, labels, dropped episodes,
+gripper commands, finish pose) are in datasets/<name>.yaml, read through dataset_specs.py.
 
-Checked against /media/ai/aipc/Karel/Mocap/Dataset (LeRobot v3.0, 4 subsets, 41 episodes):
+Checked against both recordings (LeRobot v3.0, igus ReBeL dual arm):
 - state/action are 14-D (left arm 6 + gripper, right arm 6 + gripper).
-- The left arm and both grippers never move: left arm and gripper state are always 0,
-  and gripper actions are constant (left = 0, right = 1). Only the 6 right-arm joints carry signal.
+- The left arm and both grippers never move: left-arm and gripper states are always 0, and the
+  gripper commands are constant (values in the dataset YAML). Only the 6 right-arm joints carry signal.
 - action[t] == observation.state[t + 7] (a constant 7-frame / 0.23 s position-command lead).
-- Per-frame task strings are the *subtask* (one flap). The four subsets use different
-  flap orders and different task_index numbering, so tasks must be matched by string.
+- Per-frame task strings are the flap being opened.
+- The cameras differ: the first dataset has head + wrist_right, the "thor" one adds knife_left.
+  The robot code takes the camera list from the checkpoint.
 """
 
 FPS = 30
-
-SOURCE_SUBSETS = [
-    "new_mocap_allflaps1",
-    "new_mocap_allflaps2",
-    "new_mocap_allflaps3",
-    "new_mocap_allflaps4",
-]
 
 FULL_JOINT_NAMES = [
     "arm_left_joint1",
@@ -39,18 +34,6 @@ FULL_JOINT_NAMES = [
 MODEL_DIM_INDICES = list(range(7, 13))
 MODEL_JOINT_NAMES = [FULL_JOINT_NAMES[i] for i in MODEL_DIM_INDICES]
 
-# Values the recorded data holds constant in the dims the model does not predict.
-# Used to rebuild a full 14-D command for the robot driver.
-CONSTANT_ACTION_DIMS = {
-    6: 0.0,   # arm_left_gripper
-    13: 1.0,  # arm_right_gripper
-}
-
-CAMERA_KEYS = [
-    "observation.images.head",
-    "observation.images.wrist_right",
-]
-
 FLAP_PROMPTS = {
     "back": "open the back flap",
     "front": "open the front flap",
@@ -70,16 +53,7 @@ def flap_onehot(prompt: str) -> list[float]:
     return [float(p == prompt) for p in prompts]
 
 
-# Orders that appear in the recordings (subset -> order). Any order is valid at
-# inference since every frame is conditioned on its own flap prompt.
-RECORDED_FLAP_ORDERS = {
-    "new_mocap_allflaps1": ["back", "front", "right", "left"],
-    "new_mocap_allflaps2": ["front", "back", "right", "left"],
-    "new_mocap_allflaps3": ["front", "back", "left", "right"],
-    "new_mocap_allflaps4": ["back", "front", "left", "right"],
-}
-
-# Subtask durations seen in the data (frames @ 30 fps): min ~670, median ~1050, max ~2180.
+# Longest flap in the recordings: 73 s in the first dataset, 74 s in the thor dataset.
 SUBTASK_TIMEOUT_S = 90.0
 
 ACTION_LEAD_FRAMES = 7

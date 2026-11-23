@@ -1,13 +1,13 @@
-"""High-level sequencing of the four flap sub-tasks.
+"""High-level sequencing of the flap sub-tasks.
 
-The dataset labels every frame with the flap currently being opened, so the model is
-conditioned on one prompt at a time and does not decide when a flap is finished.
-Something outside the model has to advance the prompt. This class supports an operator
-(call `advance()`), a success detector (also `advance()`), and a timeout fallback.
+The model is conditioned on one flap prompt at a time. Something outside the model advances the
+prompt: an operator (`advance()`), the finish-pose detector below, or the timeout fallback.
 """
 
 import time
 from collections.abc import Callable, Sequence
+
+import numpy as np
 
 from .constants import FLAP_PROMPTS, SUBTASK_TIMEOUT_S
 
@@ -57,3 +57,34 @@ class FlapSequencer:
         if self.timeout_s is not None and not self.done and self.elapsed_s > self.timeout_s:
             return self.advance()
         return False
+
+
+class FinishDetector:
+    """Decides a flap is done when the right arm is back at the dataset's finish pose.
+
+    Every thor recording ends with the arm at one fixed pose, standing still for 1-8 s, and the arm
+    does not pass through that pose earlier in an episode (closest approach ~0.1 rad). Back-flap
+    episodes also start there. So a flap is done once the arm, after having been more than
+    `leave_rad` away from the finish pose, is within `tol_rad` of it (every joint) for `hold_s`.
+    Call `update` once per control tick and `reset` when a new flap starts.
+    """
+
+    def __init__(self, finish_pose: np.ndarray, hz: float, tol_rad: float = 0.05, hold_s: float = 1.0,
+                 leave_rad: float = 0.2):
+        self.finish_pose = np.asarray(finish_pose, dtype=np.float32)
+        self.tol_rad, self.leave_rad = tol_rad, leave_rad
+        self.hold_ticks = max(1, round(hold_s * hz))
+        self.reset()
+
+    def reset(self) -> None:
+        self._left = False
+        self._held = 0
+
+    def distance(self, right6: np.ndarray) -> float:
+        return float(np.abs(np.asarray(right6) - self.finish_pose).max())
+
+    def update(self, right6: np.ndarray) -> bool:
+        d = self.distance(right6)
+        self._left |= d > self.leave_rad
+        self._held = self._held + 1 if (self._left and d <= self.tol_rad) else 0
+        return self._held >= self.hold_ticks

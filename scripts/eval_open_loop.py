@@ -1,22 +1,26 @@
 #!/usr/bin/env python
 """Open-loop evaluation on held-out episodes.
 
-At every `--stride` frames of each validation episode, feed the recorded observation
-(both cameras + right-arm state + flap prompt) to the policy and compare the first
+At every `--stride` frames of each held-out episode, feed the recorded observation (the
+checkpoint's cameras + right-arm state + flap prompt) to the policy and compare the first
 `--horizon` (50) predicted steps against the recorded actions. Reported as mean absolute error
 in radians, next to a "hold current pose" baseline the model has to beat. The horizon is the same
 for every model (ACT predicts 100 steps, pi0.5 50), so their scores can be compared directly.
 Scores are reported per episode, per flap and overall.
 
---prompt-swap also gives the model every query with the three wrong flap prompts (same sampling
-noise), to test whether it follows the prompt: the error should be lowest with the right prompt.
-A model that ignores the prompt and goes by the images alone scores about the same with every
-prompt, and the right prompt fits best only ~25% of the time (chance).
+The dataset is the one the checkpoint was trained on (its train_config.json), so checkpoints of
+different datasets (2 or 3 cameras) can be scored side by side.
 
-Overfitting check: score every saved checkpoint on the held-out episodes and on training episodes
-(--episodes 5 15 25 35). --trackio adds the scores to the training run's Trackio dashboard at the
-checkpoint's step (eval/heldout_mae, eval/train_episodes_mae), next to train/loss. If heldout_mae
-stops falling while train_episodes_mae keeps falling, the model is memorizing its training episodes.
+--prompt-swap also gives the model every query with the other flap prompts of its dataset (same
+sampling noise), to test whether it follows the prompt: the error should be lowest with the right
+prompt. A model that ignores the prompt scores about the same with every prompt, and the right
+prompt fits best only at chance level (1 / number of prompts: 50% for front/back).
+
+Overfitting check: score every saved checkpoint on the held-out episodes and on one training
+episode per recording folder (--train-probe). --trackio adds the scores to the training run's
+Trackio dashboard at the checkpoint's step (eval/heldout_mae, eval/train_episodes_mae). If
+heldout_mae stops falling while train_episodes_mae keeps falling, the model is memorizing its
+training episodes. scripts/eval_checkpoints.sh does both for every checkpoint of a run.
 
 This uses the same FlapPolicy code path as the robot, so it doubles as a check of the
 deployment wrapper. Open-loop error is a sanity check, not a success-rate predictor.
@@ -25,13 +29,12 @@ Works for any model folder (pi05, act); the model type is read from the checkpoi
 Usage:
     source env.sh   (from the project root)
     uv run python scripts/eval_open_loop.py --checkpoint $CHECKPOINT_ROOT/<model>/<run>/checkpoints/last/pretrained_model
-    uv run python scripts/eval_open_loop.py --checkpoint ... --prompt-swap     # 4x the queries
-    uv run python scripts/eval_open_loop.py --checkpoint ... --episodes 5 15 25 35 --trackio
+    uv run python scripts/eval_open_loop.py --checkpoint ... --prompt-swap     # 2-4x the queries
+    uv run python scripts/eval_open_loop.py --checkpoint ... --train-probe --trackio
 """
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 import matplotlib
@@ -42,7 +45,8 @@ import numpy as np
 import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from open_box_vla.constants import CAMERA_KEYS, FLAP_PROMPTS, FPS, MODEL_DIM_INDICES, MODEL_JOINT_NAMES
+from open_box_vla.constants import FLAP_PROMPTS, FPS, MODEL_DIM_INDICES, MODEL_JOINT_NAMES
+from open_box_vla.dataset_specs import checkpoint_dataset, load_split
 from open_box_vla.policy_runner import FlapPolicy
 
 FLAP_OF_PROMPT = {prompt: flap for flap, prompt in FLAP_PROMPTS.items()}
@@ -88,40 +92,49 @@ def log_scores_to_trackio(summary: dict, checkpoint: Path) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--checkpoint", type=Path, required=True, help=".../checkpoints/<step>/pretrained_model")
-    p.add_argument("--dataset-root", type=Path, default=Path(os.environ.get("DATASET_ROOT", "")))
-    p.add_argument("--repo-id", default=os.environ.get("DATASET_REPO_ID", "compal/open_box_flaps_right6"))
-    p.add_argument("--episodes", type=int, nargs="*", help="default: the 'val' list in meta/open_box_split.json")
+    p.add_argument("--dataset-root", type=Path, default=None, help="default: the dataset the checkpoint was trained on")
+    p.add_argument("--episodes", type=int, nargs="*", help="default: the held-out ('val') episodes")
+    p.add_argument("--train-probe", action="store_true",
+                   help="score one training episode per recording folder instead (overfitting check)")
     p.add_argument("--stride", type=int, default=30, help="frames between queries")
     p.add_argument("--max-queries", type=int, default=0, help="per episode, 0 = all")
     p.add_argument("--horizon", type=int, default=50, help="predicted steps scored per query (pi0.5 predicts 50)")
     p.add_argument("--out", type=Path, default=None,
                    help="default: <checkpoint>/../eval_open_loop (held-out) or eval_open_loop_train_episodes")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="cuda")
     p.add_argument("--prompt-swap", action="store_true",
-                   help="also query every frame with the 3 wrong flap prompts (tests prompt following)")
+                   help="also query every frame with the dataset's other flap prompts (tests prompt following)")
     p.add_argument("--trackio", action="store_true",
                    help="add the scores to the training run's Trackio dashboard at this checkpoint's step")
     args = p.parse_args()
 
-    val = json.loads((args.dataset_root / "meta/open_box_split.json").read_text())["val"]
-    episodes = args.episodes or val
+    repo_id, root = checkpoint_dataset(args.checkpoint)
+    root = args.dataset_root or root
+    split_file = load_split(root)
+    val = split_file["val"]
+    episodes = args.episodes or (split_file["train_probe"] if args.train_probe else val)
     split = "heldout" if set(episodes) <= set(val) else "train_episodes" if not set(episodes) & set(val) else "mixed"
     if args.trackio and split == "mixed":
         raise SystemExit("--trackio needs only held-out or only training episodes, not a mix")
     out = args.out or args.checkpoint.parent / {"heldout": "eval_open_loop"}.get(split, f"eval_open_loop_{split}")
     out.mkdir(parents=True, exist_ok=True)
 
-    policy = FlapPolicy(args.checkpoint)
+    policy = FlapPolicy(args.checkpoint, device=args.device)
     chunk = min(args.horizon, policy.policy.config.chunk_size)
     ds = LeRobotDataset(
-        args.repo_id,
-        root=args.dataset_root,
+        repo_id,
+        root=root,
         episodes=episodes,
         delta_timestamps={"action": [i / FPS for i in range(chunk)]},
     )
+    # the flap prompts this dataset was recorded with, in FLAP_PROMPTS order
+    prompts = {f: p for f, p in FLAP_PROMPTS.items() if p in set(ds.meta.tasks.index)}
+    names = list(prompts)
 
     summary = {"checkpoint": str(args.checkpoint), "policy": policy.policy.config.type, "horizon": chunk,
-               "split": split, "episodes": {}, "joint_names": MODEL_JOINT_NAMES}
+               "dataset": str(root), "cameras": policy.camera_names, "split": split, "episodes": {},
+               "joint_names": MODEL_JOINT_NAMES}
     all_err, all_hold, all_flap, swap_err = [], [], [], []
     for ep in episodes:
         rows = [i for i in range(len(ds)) if int(ds.hf_dataset[i]["episode_index"]) == ep]
@@ -133,22 +146,22 @@ def main() -> None:
             s = ds[i]
             joints14 = np.zeros(14, dtype=np.float32)
             joints14[MODEL_DIM_INDICES] = s["observation.state"].numpy()
-            head, wrist = to_hwc_uint8(s[CAMERA_KEYS[0]]), to_hwc_uint8(s[CAMERA_KEYS[1]])
+            images = {n: to_hwc_uint8(s[k]) for k, n in zip(policy.camera_keys, policy.camera_names)}
             gt = s["action"].numpy()
             valid = ~s["action_is_pad"].numpy()
             flap = FLAP_OF_PROMPT[s["task"]]
-            asked = FLAP_PROMPTS if args.prompt_swap else {flap: s["task"]}
+            asked = prompts if args.prompt_swap else {flap: s["task"]}
             preds = {}
             for name, prompt in asked.items():
                 torch.manual_seed(args.seed + i)  # same sampling noise for every prompt of this query
-                preds[name] = policy.predict_chunk(head, wrist, joints14, prompt)[:chunk]
+                preds[name] = policy.predict_chunk(images, joints14, prompt)[:chunk]
             pred = preds[flap]
             hold = np.broadcast_to(s["observation.state"].numpy(), gt.shape)
             errs.append(np.where(valid[:, None], np.abs(pred - gt), np.nan))
             holds.append(np.where(valid[:, None], np.abs(hold - gt), np.nan))
             all_flap.append(flap)
-            if args.prompt_swap:  # (4 prompts, chunk, 6)
-                swap_err.append(np.stack([np.where(valid[:, None], np.abs(preds[n] - gt), np.nan) for n in FLAP_PROMPTS]))
+            if args.prompt_swap:  # (prompts, chunk, 6)
+                swap_err.append(np.stack([np.where(valid[:, None], np.abs(preds[n] - gt), np.nan) for n in names]))
             trace.append((int(s["frame_index"]), pred, s["task"]))
         e, h = np.stack(errs), np.stack(holds)  # (Q, chunk, 6)
         all_err.append(e)
@@ -197,8 +210,7 @@ def main() -> None:
         for name in FLAP_PROMPTS if (flaps == name).any()
     }
     if args.prompt_swap:
-        names = list(FLAP_PROMPTS)
-        w = np.stack(swap_err)  # (queries, 4 prompts, chunk, 6)
+        w = np.stack(swap_err)  # (queries, prompts, chunk, 6)
         summary["prompt_swap"] = {
             name: {
                 "mae_chunk_given": dict(zip(names, np.nanmean(w[flaps == name], axis=(0, 2, 3)).tolist())),
@@ -214,7 +226,8 @@ def main() -> None:
         print(f"  {name:6s} {r['queries']:4d} queries   mae_chunk {r['mae_chunk']:.4f}   hold {r['hold_mae_chunk']:.4f}")
     if args.prompt_swap:
         print("\nprompt swap: mae_chunk when given each prompt (rows: the flap actually being opened)")
-        print("        " + "".join(f"{n:>8s}" for n in names) + "   right prompt fits best (chance 25%)")
+        print("        " + "".join(f"{n:>8s}" for n in names)
+              + f"   right prompt fits best (chance {1 / len(names):.0%})")
         for name, r in summary["prompt_swap"].items():
             print(f"  {name:6s}" + "".join(f"{r['mae_chunk_given'][n]:8.4f}" for n in names)
                   + f"   {r['right_prompt_fits_best']:.0%}")

@@ -1,0 +1,50 @@
+# How scripts/prepare_dataset.py builds the training dataset from the "thor" recordings
+# (November 2026): one flap per episode, front or back, on two boxes (box2, test1), three cameras.
+#
+#   uv run python scripts/prepare_dataset.py datasets/thor.yaml      (after source env.sh)
+#
+# The raw recordings are never modified; the result goes to $HF_LEROBOT_HOME/<repo_id>.
+
+repo_id: compal/open_box_thor_right6
+raw_dir: /media/ai/aipc/Karel/Mocap/datasets
+
+# Merged in this order.
+subsets: [thor_box2_back, thor_box2_front, thor_test1_back, thor_test1_front]
+
+# Prompt for every frame of a folder. All four folders were recorded as "open the front flap";
+# the camera images and the joint ranges (compared with the first dataset) show the _back folders
+# open the back flap.
+relabel:
+  thor_box2_back: open the back flap
+  thor_test1_back: open the back flap
+
+# Episodes left out, numbered as recorded in each folder.
+drop:
+  thor_box2_back:
+    0: cut off after 10 s, the flap is still closed
+    1: approaches the flap along a path none of the other 27 back-flap episodes uses
+  thor_box2_front:
+    0: first episode of the session, keeps pushing the open flap ~30 s before going to the finish pose
+    1: cut off after 18 s, the flap is still closed
+  thor_test1_back:
+    0: first episode of the session, keeps pushing the open flap ~30 s before going to the finish pose
+  thor_test1_front:
+    0: first episode of the session, keeps holding the open flap ~30 s before going to the finish pose
+
+# The last N kept episodes of each folder are held out: never trained on, used to check overfitting.
+heldout_per_subset: 1
+
+# Facts the robot code needs (scripts/run_robot.py). prepare_dataset.py checks them against the data.
+robot:
+  # Joints the model does not predict get these commands (the recordings hold them constant).
+  constant_commands: {arm_left_gripper: 0.0, arm_right_gripper: 0.0}
+  # Every episode ends with the right arm at exactly this pose (rad), standing still for 1-8 s.
+  # run_robot.py treats "back here and still for 1 s" as "flap done".
+  finish_pose: [0.619592, 0.106465, 1.750565, -1.179843, 0.600393, 1.411972]
+  # Where the recorded episodes start. Front: the home pose (0, 0, 60, 0, 50, 0 degrees), box closed.
+  # Back: the finish pose, with the front flap already open (episodes 4-14 of both boxes)
+  # or the box closed (episodes 0-3), so "front, then back" is covered by the data.
+  start_poses:
+    front: [0.0, 0.0, 1.047198, 0.0, 0.872665, 0.0]
+    back: [0.619592, 0.106465, 1.750565, -1.179843, 0.600393, 1.411972]
+  flap_order: [front, back]

@@ -8,11 +8,12 @@ Reads the summary.json files that scripts/eval_open_loop.py writes next to each 
     uv run python scripts/compare_checkpoints.py pi05/pi05_open_box_20261114_1239 act/act_baseline
 
 Columns (radians, first 50 predicted steps, lower is better):
-  held-out     error on the 4 held-out episodes; pick the checkpoint where this is lowest
+  held-out     error on the held-out episodes; pick the checkpoint where this is lowest
   vs still     held-out error relative to a robot that stands still (-30% = 30% better)
-  train eps    error on 4 training episodes; far below held-out = memorizing the training episodes
-  prompt       how often the right flap prompt fits the recording best (chance 25%; --prompt-swap runs only)
-  back..left   held-out error per flap
+  train eps    error on one training episode per recording folder; far below held-out = memorizing
+  prompt       how often the right flap prompt fits the recording best (--prompt-swap runs only;
+               chance is 1 / number of prompts: 25% for the four-flap dataset, 50% for front/back)
+  back..left   held-out error per flap ("-": the dataset has no such flap)
 """
 
 import argparse
@@ -59,6 +60,10 @@ def main() -> None:
                   + " ".join(f"{flaps[f]['mae_chunk']:6.3f}" if f in flaps else f"{'-':>6}" for f in FLAPS)
                   + ("   <- lowest held-out error" if step == best else ""))
         print(f"  standing still: {rows[0][1]['overall']['hold_mae_chunk']:.3f} on the held-out episodes")
+        swaps = [r[1]["prompt_swap"] for r in rows if r[1].get("prompt_swap")]
+        if swaps:
+            n_prompts = len(next(iter(swaps[-1].values()))["mae_chunk_given"])
+            print(f"  prompt: chance level is {1 / n_prompts:.0%} ({n_prompts} prompts)")
 
 
 if __name__ == "__main__":

@@ -21,7 +21,8 @@ mkdir -p "$(dirname "$LOG_FILE")"
 echo "resuming $RUN_DIR from $(readlink "$RUN_DIR/checkpoints/last")   log: $LOG_FILE"
 # Trackio run = folder name, so the curves continue the same run (also for runs trained before
 # Trackio was switched on; load their earlier steps with scripts/log_to_trackio.py first).
-uv run lerobot-train --config_path="$CONFIG" --resume=true \
+# Through train_with_heldout.py, so a run with a held-out loss curve keeps using its held-out episodes.
+uv run python scripts/train_with_heldout.py --config_path="$CONFIG" --resume=true \
   --trackio.enable=true --trackio.project="${TRACKIO_PROJECT:-pi05_open_box}" \
   --trackio.run_name="$(basename "$RUN_DIR")" \
   "$@" 2>&1 | tee -a "$LOG_FILE"

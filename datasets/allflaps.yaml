@@ -1,0 +1,23 @@
+# How scripts/prepare_dataset.py built the first training dataset (November 2026): every episode
+# opens all four flaps one after another, each frame labelled with the flap being opened; two cameras.
+# The 10k-50k pi0.5 run and the ACT runs were trained on it.
+#
+#   uv run python scripts/prepare_dataset.py datasets/allflaps.yaml      (after source env.sh)
+
+repo_id: compal/open_box_flaps_right6
+raw_dir: /media/ai/aipc/Karel/Mocap/Dataset
+
+# Merged in this order. Flap orders: 1 back front right left, 2 front back right left,
+# 3 front back left right, 4 back front left right.
+subsets: [new_mocap_allflaps1, new_mocap_allflaps2, new_mocap_allflaps3, new_mocap_allflaps4]
+
+relabel: {}   # the recorded per-frame flap labels are right
+drop: {}
+
+heldout_per_subset: 1
+
+robot:
+  constant_commands: {arm_left_gripper: 0.0, arm_right_gripper: 1.0}
+  finish_pose: null   # the recordings go straight from one flap to the next: no common finish pose
+  start_poses: {}
+  flap_order: [back, front, right, left]
