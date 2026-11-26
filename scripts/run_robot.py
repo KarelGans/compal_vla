@@ -13,13 +13,13 @@ The flap order defaults to the dataset's (thor: front, then back). A flap ends w
 - --timeout-s passes.
 `q` + Enter stops. After the last flap, or on `q`, the arm is told to hold its current pose.
 
---dry-run replays a recorded held-out episode as a fake robot: observations come from the
+--dry-run replays a recorded held-out episode (a training episode if the dataset holds none out)
+as a fake robot: observations come from the
 dataset, commands are only logged and compared with the recorded actions. That runs the whole
 stack (prompting, queueing, latency, 14-D command assembly, finish detection) without hardware.
 """
 
 import argparse
-import json
 import queue
 import sys
 import threading
@@ -30,7 +30,7 @@ from typing import Protocol
 import numpy as np
 
 from open_box_vla.constants import FPS, MODEL_DIM_INDICES
-from open_box_vla.dataset_specs import checkpoint_dataset
+from open_box_vla.dataset_specs import checkpoint_dataset, load_split
 from open_box_vla.flap_sequencer import FinishDetector, FlapSequencer
 from open_box_vla.policy_runner import IMAGE_PREFIX, FlapPolicy
 
@@ -107,8 +107,11 @@ def dry_run(args, policy: FlapPolicy, finish: FinishDetector | None) -> None:
     repo_id, root = checkpoint_dataset(args.checkpoint)
     root = args.dataset_root or root
     ep = args.dry_run_episode
-    if ep is None:
-        ep = json.loads((root / "meta/open_box_split.json").read_text())["val"][0]
+    if ep is None:  # the first held-out episode; without any (heldout_per_subset: 0), a training episode
+        split = load_split(root)
+        ep = (split["val"] or split["train_probe"])[0]
+        if not split["val"]:
+            print(f"no held-out episodes in this dataset: replaying training episode {ep}")
     robot = ReplayRobot(repo_id, root, ep)
     n = len(robot.ds) if args.dry_run_steps == 0 else min(args.dry_run_steps, len(robot.ds))
     latencies, prompt, fired = [], None, None
@@ -162,7 +165,7 @@ def main() -> None:
     p.add_argument("--finish-hold-s", type=float, default=1.0)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--dataset-root", type=Path, default=None, help="dry run; default: the checkpoint's dataset")
-    p.add_argument("--dry-run-episode", type=int, default=None, help="default: first held-out episode")
+    p.add_argument("--dry-run-episode", type=int, default=None, help="default: first held-out episode (none held out: the first train probe)")
     p.add_argument("--dry-run-steps", type=int, default=300, help="0 = the whole episode")
     args = p.parse_args()
 

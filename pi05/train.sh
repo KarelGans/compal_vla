@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Fine-tune pi0.5 (lerobot/pi05_base) on a prepared open-box-flaps dataset (default: the thor
-# dataset with three cameras, see env.sh; the model uses every camera of the dataset).
+# Fine-tune pi0.5 (lerobot/pi05_base) on a prepared open-box-flaps dataset (default: thor_v3 with
+# three cameras, see env.sh; the model uses every camera of the dataset). If the dataset's YAML sets
+# flap_balance_exponent, training draws the flaps in those shares (scripts/train_with_heldout.py).
+# The dataset's held-out episodes (meta/open_box_split.json) are kept out of training. A dataset
+# built with heldout_per_subset: 0 has none: every episode is trained on and the held-out loss is off.
 #
 #   bash pi05/train.sh                          # full run with the defaults below
 #   STEPS=10000 bash pi05/train.sh              # override any setting through the environment
@@ -37,6 +40,12 @@ SAVE_FREQ="${SAVE_FREQ:-10000}"
 # of the held-out episodes (~1 min each); 0 = off.
 EVAL_STEPS="${EVAL_STEPS:-1000}"
 export HELDOUT_STRIDE="${HELDOUT_STRIDE:-5}"
+EXCLUDE_FLAGS=(--dataset.exclude_episodes="$VAL_EPISODES")
+if [[ "$VAL_EPISODES" == "[]" ]]; then   # no held-out episodes: nothing to exclude or evaluate on
+  if (( EVAL_STEPS > 0 )); then echo "no held-out episodes in this dataset: held-out loss off"; fi
+  EVAL_STEPS=0
+  EXCLUDE_FLAGS=()
+fi
 # 4 workers already feed the GPU faster than it trains; 8 used ~30 GB of host RAM.
 NUM_WORKERS="${NUM_WORKERS:-4}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-2}"
@@ -50,7 +59,7 @@ mkdir -p "$PI05_ROOT/logs"
 N_CKPT=$(( (STEPS + SAVE_FREQ - 1) / SAVE_FREQ ))
 NEED_GB=$(( N_CKPT * GB_PER_CHECKPOINT ))
 FREE_GB=$(df --output=avail -BG "$PI05_ROOT" | tail -1 | tr -dc '0-9')
-echo "run=$RUN_NAME  steps=$STEPS  batch=$BATCH_SIZE  dataset=$DATASET_REPO_ID  held-out episodes=$VAL_EPISODES"
+echo "run=$RUN_NAME  steps=$STEPS  batch=$BATCH_SIZE  dataset=$DATASET_REPO_ID  held-out episodes=$([[ $VAL_EPISODES == "[]" ]] && echo "none (all episodes train)" || echo "$VAL_EPISODES")"
 echo "checkpoints: $N_CKPT x ~${GB_PER_CHECKPOINT} GB = ~${NEED_GB} GB needed, ${FREE_GB} GB free on $(df --output=target "$PI05_ROOT" | tail -1)"
 if (( FREE_GB < NEED_GB )) && [[ "${SKIP_DISK_CHECK:-0}" != 1 ]]; then
   echo "Not enough space. Free some, raise SAVE_FREQ, or set SKIP_DISK_CHECK=1."; exit 1
@@ -77,7 +86,7 @@ fi
 CMD=(uv run python scripts/train_with_heldout.py   # = lerobot-train + the held-out loss curve
   --dataset.repo_id="$DATASET_REPO_ID"
   --dataset.root="$DATASET_ROOT"
-  --dataset.exclude_episodes="$VAL_EPISODES"
+  "${EXCLUDE_FLAGS[@]}"
   --policy.type=pi05
   --policy.pretrained_path="$PRETRAINED_POLICY"
   --policy.dtype=bfloat16

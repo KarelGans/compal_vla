@@ -21,10 +21,15 @@ class DatasetSpec:
     path: Path
     repo_id: str
     raw_dir: Path
-    subsets: list[str]
+    subsets: list[str]                     # folders, relative to raw_dir (may contain a "/")
     relabel: dict[str, str]                # folder -> prompt for all of its frames
-    drop: dict[str, dict[int, str]]        # folder -> {episode as recorded: reason}
-    heldout_per_subset: int
+    # folder -> {(episode as recorded, None for the whole episode or the flap of one piece): reason}
+    drop: dict[str, dict[tuple[int, str | None], str]]
+    # folders recorded with several flaps per episode -> {episode as recorded: cut times (s) that
+    # replace the label changes}; every episode of these folders is cut into one episode per flap
+    split_by_label: dict[str, dict[int, list[float]]]
+    heldout_per_subset: int                # per flap of each folder
+    flap_balance_exponent: float           # 1 = every frame equally often; see flap_shares()
     constant_commands: dict[int, float]    # 14-D joint index -> command the recordings hold constant
     finish_pose: np.ndarray | None         # (6,) right arm: where every episode ends, or None
     start_poses: dict[str, np.ndarray]     # flap -> (6,) right-arm pose its episodes start from
@@ -41,20 +46,56 @@ def load_spec(path: str | Path) -> DatasetSpec:
     bad_prompts = set((d.get("relabel") or {}).values()) - set(FLAP_PROMPTS.values())
     if bad_prompts:
         raise ValueError(f"{path}: relabel prompts must be one of {list(FLAP_PROMPTS.values())}, got {bad_prompts}")
+    exponent = float(d.get("flap_balance_exponent", 1.0))
+    if not 0.0 <= exponent <= 1.0:
+        raise ValueError(f"{path}: flap_balance_exponent must be between 0 and 1, got {exponent}")
     pose = lambda v: None if v is None else np.asarray(v, dtype=np.float32)  # noqa: E731
+    split = {s: {int(e): [float(t) for t in (ts if isinstance(ts, list) else [ts])] for e, ts in (cuts or {}).items()}
+             for s, cuts in (d.get("split_by_label") or {}).items()}
+    drop = {s: {drop_key(k, path): str(why) for k, why in (eps or {}).items()} for s, eps in (d.get("drop") or {}).items()}
+    for s, eps in drop.items():
+        if any(part for _, part in eps) and s not in split:
+            raise ValueError(f"{path}: drop names pieces (\"<episode> <flap>\") of {s}, which is not under split_by_label")
     return DatasetSpec(
         path=path,
         repo_id=d["repo_id"],
         raw_dir=Path(d["raw_dir"]),
         subsets=list(d["subsets"]),
         relabel=dict(d.get("relabel") or {}),
-        drop={s: {int(e): str(why) for e, why in (eps or {}).items()} for s, eps in (d.get("drop") or {}).items()},
+        drop=drop,
+        split_by_label=split,
         heldout_per_subset=int(d.get("heldout_per_subset", 1)),
+        flap_balance_exponent=exponent,
         constant_commands={FULL_JOINT_NAMES.index(k): float(v) for k, v in (robot.get("constant_commands") or {}).items()},
         finish_pose=pose(robot.get("finish_pose")),
         start_poses={k: pose(v) for k, v in (robot.get("start_poses") or {}).items()},
         flap_order=list(robot.get("flap_order") or FLAP_PROMPTS),
     )
+
+
+def drop_key(key, path: Path | str = "") -> tuple[int, str | None]:
+    """A `drop` entry: an episode number (the whole episode), or "<episode> <flap>" (one piece of
+    an episode of a split_by_label folder)."""
+    episode, _, part = str(key).strip().partition(" ")
+    if not episode.isdigit() or (part and part not in FLAP_PROMPTS):
+        raise ValueError(f"{path}: drop entries are an episode number or \"<episode> <flap>\", got {key!r}")
+    return int(episode), part or None
+
+
+def drop_name(episode: int, part: str | None) -> str:
+    return f"{episode} {part}" if part else str(episode)
+
+
+def flap_shares(train_frames: dict[str, int], exponent: float) -> dict[str, float]:
+    """Share of the training draws each flap gets when a flap with n training frames is weighted n**exponent.
+
+    exponent 1: every frame is drawn equally often, so the shares follow the amount of data.
+    exponent 0: every flap gets the same share, however many frames it has.
+    In between, the large flaps are drawn less and the small ones more (pi0 mixed its datasets with 0.43).
+    """
+    weights = {flap: n**exponent for flap, n in train_frames.items() if n > 0}
+    total = sum(weights.values())
+    return {flap: w / total for flap, w in weights.items()}
 
 
 def spec_for_repo_id(repo_id: str) -> DatasetSpec:

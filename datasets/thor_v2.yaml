@@ -1,0 +1,74 @@
+# How scripts/prepare_dataset.py builds the training dataset from the "dataset_v2" recordings
+# (November 2026: new movements for the front, left and right flaps) plus the back-flap episodes
+# of the first thor recordings. One flap per episode, three cameras (head, wrist_right,
+# knife_left), every episode ends at the same rest pose.
+#
+#   uv run python scripts/prepare_dataset.py datasets/thor_v2.yaml      (after source env.sh)
+#
+# The raw recordings are never modified; the result goes to $HF_LEROBOT_HOME/<repo_id>.
+
+repo_id: compal/open_box_thor_v2_right6
+raw_dir: /media/ai/aipc/Karel/Mocap/datasets
+
+# Merged in this order (relative to raw_dir), grouped by flap in the order the robot opens them.
+subsets:
+  - dataset_v2/thor_box_front_newmovement      # front: 15 episodes recorded
+  - thor_box2_back                             # back, on box2: 15
+  - thor_test1_back                            # back, on box test1: 15
+  - dataset_v2/thor_box_flapleft_newmovement   # left: 7
+  - dataset_v2/thor_box_flapright_newmovement  # right: 7
+# Not used: thor_box2_front and thor_test1_front. Their front movement is completely different
+# from the new one, and under the same prompt the model would mix the two.
+
+# Prompt for every frame of a folder. Every folder was recorded as "open the front flap"; the camera
+# images show which flap each one opens. flapleft opens the flap on the left of the head-camera
+# image, with the front and back already open; flapright the one on the right, with front, back
+# and left open.
+relabel:
+  dataset_v2/thor_box_flapleft_newmovement: open the left flap
+  dataset_v2/thor_box_flapright_newmovement: open the right flap
+  thor_box2_back: open the back flap
+  thor_test1_back: open the back flap
+
+# Episodes left out, numbered as recorded in each folder.
+drop:
+  dataset_v2/thor_box_front_newmovement:
+    0: opens the flap but stays at the box and never returns to the rest pose; its path is the least like the others
+    13: cut off after 12 s, the flap is still closed
+  thor_box2_back:
+    0: cut off after 10 s, the flap is still closed
+    1: approaches the flap along a path none of the other 27 back-flap episodes uses
+  thor_test1_back:
+    0: first episode of the session, keeps pushing the open flap ~30 s before going to the finish pose
+
+# The last N kept episodes of each folder are held out: never trained on, used to check overfitting.
+heldout_per_subset: 1
+
+# How often training draws each flap (scripts/train_with_heldout.py). A flap with n training
+# frames gets n^exponent of the draws:
+#   1     every frame equally often, so each flap's share follows its amount of data;
+#   0     every flap equally often, however few episodes it has;
+#   0.43  in between: the weighting pi0 used to mix datasets of different sizes.
+# With the episodes above (training: front 12, back 25, left 6, right 6), 0.43 gives
+# front 29%, back 33%, left 19%, right 18% of the draws, instead of 32 / 45 / 13 / 11% by frames.
+# A left/right frame is then drawn ~2x as often as a back frame. Not all the way to 25% each: that
+# would be 3.5-4x, and the 6 left/right episodes would be memorised much sooner than the rest.
+# prepare_dataset.py prints the shares at the end of the build.
+flap_balance_exponent: 0.43
+
+# Facts the robot code needs (scripts/run_robot.py). prepare_dataset.py checks them against the data.
+robot:
+  # Joints the model does not predict get these commands (the recordings hold them constant).
+  constant_commands: {arm_left_gripper: 0.0, arm_right_gripper: 0.0}
+  # Every episode ends with the right arm at exactly this pose (rad), standing still for about 1-8 s.
+  # run_robot.py treats "back here and still for 1 s" as "flap done".
+  finish_pose: [0.619592, 0.106465, 1.750565, -1.179843, 0.600393, 1.411972]
+  # Where the recorded episodes start, and which flaps were open then.
+  start_poses:
+    front: [0.0, 0.0, 1.047198, 0.0, 0.872665, 0.0]                         # home pose, box closed
+    # finish pose, front open (episodes 4-14 of both boxes) or box closed (0-3); side flaps closed
+    back: [0.619592, 0.106465, 1.750565, -1.179843, 0.600393, 1.411972]
+    left: [0.619592, 0.106465, 1.750565, -1.179843, 0.600393, 1.411972]      # finish pose, front and back open
+    right: [0.619592, 0.106465, 1.750565, -1.179843, 0.600393, 1.411972]     # finish pose, front, back and left open
+  # In this order every flap starts the way it was recorded: with the flaps before it already open.
+  flap_order: [front, back, left, right]

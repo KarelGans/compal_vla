@@ -21,6 +21,7 @@ episode per recording folder (--train-probe). --trackio adds the scores to the t
 Trackio dashboard at the checkpoint's step (eval/heldout_mae, eval/train_episodes_mae). If
 heldout_mae stops falling while train_episodes_mae keeps falling, the model is memorizing its
 training episodes. scripts/eval_checkpoints.sh does both for every checkpoint of a run.
+A dataset built with heldout_per_subset: 0 has no held-out episodes: use --train-probe or --episodes.
 
 This uses the same FlapPolicy code path as the robot, so it doubles as a check of the
 deployment wrapper. Open-loop error is a sanity check, not a success-rate predictor.
@@ -114,7 +115,10 @@ def main() -> None:
     split_file = load_split(root)
     val = split_file["val"]
     episodes = args.episodes or (split_file["train_probe"] if args.train_probe else val)
-    split = "heldout" if set(episodes) <= set(val) else "train_episodes" if not set(episodes) & set(val) else "mixed"
+    if not episodes:
+        raise SystemExit(f"{root} has no held-out episodes (built with heldout_per_subset: 0): score "
+                         "training episodes with --train-probe, or pick episodes with --episodes")
+    split ="heldout" if set(episodes) <= set(val) else "train_episodes" if not set(episodes) & set(val) else "mixed"
     if args.trackio and split == "mixed":
         raise SystemExit("--trackio needs only held-out or only training episodes, not a mix")
     out = args.out or args.checkpoint.parent / {"heldout": "eval_open_loop"}.get(split, f"eval_open_loop_{split}")

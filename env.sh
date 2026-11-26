@@ -13,10 +13,12 @@ export HF_TOKEN_PATH="$HOME/.cache/huggingface/token"  # keep the HF token priva
 export HF_LEROBOT_HOME="$VLA_STORAGE/lerobot_datasets"
 
 # Dataset pi05/train.sh trains on, built by scripts/prepare_dataset.py from datasets/<name>.yaml:
-#   compal/open_box_thor_right6   datasets/thor.yaml      front/back flaps, one per episode, 3 cameras
-#   compal/open_box_flaps_right6  datasets/allflaps.yaml  all four flaps per episode, 2 cameras
+#   compal/open_box_thor_v3_right6  datasets/thor_v3.yaml   thor_v2 + the 2026-11-26 front/left/right recordings, 3 cameras, none held out
+#   compal/open_box_thor_v2_right6  datasets/thor_v2.yaml   new front/left/right + thor back, one flap per episode, 3 cameras
+#   compal/open_box_thor_right6     datasets/thor.yaml      front/back flaps, one per episode, 3 cameras
+#   compal/open_box_flaps_right6    datasets/allflaps.yaml  all four flaps per episode, 2 cameras
 # Evaluation and robot scripts read the dataset from the checkpoint instead.
-export DATASET_REPO_ID="${DATASET_REPO_ID:-compal/open_box_thor_right6}"
+export DATASET_REPO_ID="${DATASET_REPO_ID:-compal/open_box_thor_v3_right6}"
 export DATASET_ROOT="${DATASET_ROOT:-$HF_LEROBOT_HOME/$DATASET_REPO_ID}"
 # Same data plus the flap as 4 numbers, for models without a text input (ACT); scripts/add_flap_onehot.py
 export DATASET_REPO_ID_ONEHOT="${DATASET_REPO_ID_ONEHOT:-${DATASET_REPO_ID}_onehot}"
